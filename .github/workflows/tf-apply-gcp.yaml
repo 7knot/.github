@@ -1,0 +1,65 @@
+name: Terraform Apply GCP
+on:
+  workflow_call:
+    inputs:
+      workload-identity-provider:
+        required: true
+        type: string
+      service-account:
+        required: true
+        type: string
+      work-dir:
+        required: true
+        type: string
+
+jobs:
+  deploy-gcp:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    -
+      name: Clone repository
+      uses: actions/checkout@v3
+
+    -
+      name: Authenticate to Google Cloud Platform
+      uses: google-github-actions/auth@v0
+      with:
+        create_credentials_file: true
+        access_token_lifetime: 900s
+        workload_identity_provider: ${{ inputs.workload-identity-provider }}
+        service_account: ${{ inputs.service-account }}
+
+
+    -
+      name: Get terraform version from .tool-versions
+      id: get-terraform-version
+      run: |
+        TF_VERSION=$(cat .tool-versions | awk -F' ' '{ if($1 == "terraform") print $2 }')
+        echo ""::set-output name=TF_VERSION::${TF_VERSION}
+
+    -
+      name: Setup terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ steps.get-terraform-version.outputs.TF_VERSION }}
+
+    -
+      name: Run terraform init
+      id: init
+      run: terraform init
+      working-directory: ${{ inputs.work-dir }}
+
+    -
+      name: Run terraform plan
+      id: plan
+      run: terraform plan -no-color
+      working-directory: ${{ inputs.work-dir }}
+
+    -
+      name: Run terraform apply
+      if: ${{ !contains(steps.plan.outputs.stdout, 'No changes.') }}
+      run: terraform apply -auto-approve -no-color
+      working-directory: ${{ inputs.work-dir }}

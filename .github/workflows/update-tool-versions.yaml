@@ -1,0 +1,126 @@
+name: Update .tool-versions
+on:
+  workflow_call:
+    inputs:
+      update-tools:
+        required: false
+        description: |-
+          if this flag is true, update all tool without k8s ops tools such as kubectl versions
+        type: boolean
+        default: false
+      update-k8s-ops-tools:
+        required: false
+        description: |-
+          if this flag is true, update k8s ops tool versions such as kubectl
+        type: boolean
+        default: false
+      workload-identity-provider:
+        required: false
+        type: string
+      service-account:
+        required: false
+        type: string
+      path-to-tool-versions:
+        required: true
+        type: string
+      cluster-name:
+        required: false
+        type: string
+      cluster-region:
+        required: false
+        type: string
+        default: asia-northeast1
+    secrets:
+      github-token:
+        required: true
+
+jobs:
+  update-tool-versions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    steps:
+    -
+      name: Checkout
+      uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.github-token }}
+
+    -
+      if: ${{ inputs.update-k8s-ops-tools }}
+      name: Authenticate to Google Cloud Platform
+      uses: google-github-actions/auth@v0
+      with:
+        create_credentials_file: true
+        access_token_lifetime: 900s
+        workload_identity_provider: ${{ inputs.workload-identity-provider }}
+        service_account: ${{ inputs.service-account }}
+
+    -
+      if: ${{ inputs.update-k8s-ops-tools }}
+      name: Get GKE Cluster Credentials
+      run: |-
+        gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${CLUSTER_REGION}
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        CLUSTER_REGION: ${{ inputs.cluster-region }}
+
+    -
+      if: ${{ inputs.update-k8s-ops-tools }}
+      name: Update kubectl
+      run: |-
+        curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+        sudo apt-get update -y && sudo apt-get install -y kubectl
+        if grep -R "kubectl " "${PATH_TO_TOOL_VERSIONS}"
+        then
+          echo "found kubectl in ${PATH_TO_TOOL_VERSIONS}"
+          echo "if the kubernetes version on the master node is newer, update kubectl in ${PATH_TO_TOOL_VERSIONS}"
+          KUBECTL_VER=$(kubectl version -o json | jq '.serverVersion.gitVersion' | grep -o -E "[0-9]*\.[0-9]*\.[0-9]*")
+          sed -i "s/^kubectl [0-9]*\.[0-9]*\.[0-9]*/kubectl ${KUBECTL_VER}/g" "${PATH_TO_TOOL_VERSIONS}"
+        fi
+      env:
+        PATH_TO_TOOL_VERSIONS: ${{ inputs.path-to-tool-versions }}
+
+    -
+      if: ${{ inputs.update-tools }}
+      name: Update all tools without k8s ops tools such as kubectl
+      run: |-
+        git clone https://github.com/asdf-vm/asdf.git ~/.asdf --branch v0.10.2
+        PATH="${PATH}:/asdf/.asdf/shims:/asdf/.asdf/bin"
+        source "$HOME"/.asdf/asdf.sh
+        cat ${PATH_TO_TOOL_VERSIONS} | grep -v 'kubectl ' | awk '{ print $1,$2; }' | \
+          while read -r tool ver
+          do
+            asdf plugin add ${tool}
+            major=$(echo "${ver}" | egrep -o '^[0-9]*')
+            latest=$(asdf latest ${tool} ${major})
+            sed -i "s/^${tool} [0-9]*\.[0-9]*\.[0-9]*/${tool} ${latest}/g" "${PATH_TO_TOOL_VERSIONS}"
+          done
+      env:
+        PATH_TO_TOOL_VERSIONS: ${{ inputs.path-to-tool-versions }}
+
+    -
+      name: Git commit/push auto-updated .tool-versions`s and create/merge PR
+      run: |-
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        git config --local push.default current
+        if [[ `git status --porcelain` ]]; then
+          dir=$(dirname "${PATH_TO_TOOL_VERSIONS}" | sed "s/\//-/g")
+          if [ "${dir}" = "." ]
+          then
+            dir="root"
+          fi
+          git checkout -b chore/auto-update-tool-versions-in-${dir}
+          git add -u
+          git commit -m "chore: auto-update ${PATH_TO_TOOL_VERSIONS}."
+          git push
+          PR_URL=$(gh pr create --fill)
+          gh pr merge ${PR_URL} --squash --admin --delete-branch
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.github-token }}
+        PATH_TO_TOOL_VERSIONS: ${{ inputs.path-to-tool-versions }}
